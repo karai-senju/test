@@ -31,7 +31,9 @@
     overflow-wrap: anywhere;
   }
   #expr { min-height: 1.4em; font-size: 1rem; opacity: 0.6; }
-  #result { font-size: 2.8rem; font-weight: 300; }
+  #result { font-size: 2.8rem; font-weight: 300; cursor: pointer; border-radius: 12px; }
+  #result:focus-visible { outline: 2px solid #fff; }
+  #result[data-msg]::before { content: attr(data-msg) ' '; font-size: 1rem; color: #2cb67d; vertical-align: middle; }
   .keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
   button {
     height: 52px;
@@ -49,16 +51,24 @@
   .op { background: #7f5af0; }
   .op:hover { background: #9373ff; }
   .fn { color: #2cb67d; }
-  .eq { background: #2cb67d; grid-column: span 2; }
+  .eq { background: #2cb67d; }
   .eq:hover { background: #3fd393; }
   .sci { font-size: 1rem; color: #cfc6ff; background: rgba(127, 90, 240, 0.15); }
+  .history { margin-top: 16px; color: #fff; font-size: 0.9rem; }
+  .history-head { display: flex; justify-content: space-between; align-items: center; padding: 0 8px; }
+  .history-head span { opacity: 0.6; }
+  .history ul { list-style: none; padding: 0; max-height: 132px; overflow-y: auto; }
+  .history button { height: auto; width: 100%; padding: 4px 8px; border-radius: 10px; font-size: 0.9rem; text-align: right; background: none; }
+  .history button:hover { background: rgba(255, 255, 255, 0.1); }
+  .history .clear { width: auto; opacity: 0.6; }
+  .history .clear:hover { opacity: 1; }
 </style>
 </head>
 <body>
 <main class="calc">
   <div class="display" aria-live="polite">
     <div id="expr"></div>
-    <div id="result">0</div>
+    <div id="result" role="button" tabindex="0" title="Click to copy">0</div>
   </div>
   <div class="keys">
     <button class="sci" data-k="mode" id="mode" aria-label="Toggle degrees or radians">DEG</button>
@@ -87,18 +97,24 @@
     <button class="op" data-k="+" aria-label="Plus">+</button>
     <button class="sci" data-k="inv" aria-label="Reciprocal">1/x</button>
     <button data-k="0">0</button><button data-k=".">.</button>
+    <button class="sci" data-k="ans" aria-label="Last answer">Ans</button>
     <button class="eq" data-k="=">=</button>
   </div>
+  <section class="history" id="history" aria-label="History" hidden>
+    <div class="history-head"><span>History</span><button class="clear" id="clearHist" aria-label="Clear history">Clear</button></div>
+    <ul id="hist"></ul>
+  </section>
 </main>
 <script>
   const exprEl = document.getElementById('expr');
   const resultEl = document.getElementById('result');
   let expr = '';
+  let done = false; // just pressed "=": Ans / history start a new expression
 
   const pretty = s => s.replace(/\*/g, '×').replace(/\//g, '÷').replace(/-/g, '−');
 
   let deg = true;
-  const tokens = { sin: 'sin(', cos: 'cos(', tan: 'tan(', ln: 'ln(', log: 'log(', sqrt: '√(', pi: 'π', e: 'ℯ', sq: '^2', inv: '^(-1)' };
+  const tokens = { sin: 'sin(', cos: 'cos(', tan: 'tan(', ln: 'ln(', log: 'log(', sqrt: '√(', pi: 'π', e: 'ℯ', sq: '^2', inv: '^(-1)', ans: 'Ans' };
   const fact = n => n < 0 || n % 1 ? NaN : n > 170 ? Infinity : n < 2 ? 1 : n * fact(n - 1);
   // Round so sin(180°) is 0, not 1.2e-16.
   const trig = f => x => Math.round(f(deg ? x * Math.PI / 180 : x) * 1e15) / 1e15;
@@ -106,6 +122,7 @@
   function evaluate(s) {
     const open = (s.match(/\(/g) || []).length - (s.match(/\)/g) || []).length;
     s = (s + ')'.repeat(Math.max(0, open)))
+      .replace(/Ans/g, `(${hist[0] ? hist[0][1] : 0})`) // before implicit multiply, so 2Ans → 2(5) → 2*(5)
       .replace(/([\d.)πℯ!])(?=[(sctl√πℯ])/g, '$1*') // implicit multiply: 2π, 3sin(…), (1)(2)
       .replace(/([)πℯ!])(?=[\d.])/g, '$1*')
       .replace(/([\d.]+)!/g, 'fact($1)')
@@ -122,23 +139,75 @@
       deg = !deg;
       document.getElementById('mode').textContent = deg ? 'DEG' : 'RAD';
     } else if (k === 'C' || k === 'Escape') expr = '';
-    else if (k === 'Backspace') expr = expr.replace(/([a-z√]+\(|.)$/, ''); // drop whole "sin(" at once
+    else if (k === 'Backspace') expr = expr.replace(/(Ans|[a-z√]+\(|.)$/, ''); // drop whole "sin(" / "Ans" at once
     else if (k === '=' || k === 'Enter') {
       if (!expr) return;
+      const x = expr;
       try { expr = String(evaluate(expr)); } catch { expr = 'Error'; }
       exprEl.textContent = '';
       resultEl.textContent = expr;
+      done = true;
       if (expr === 'Error') expr = '';
+      else if (x !== expr) {
+        hist = [[x, expr], ...hist].slice(0, 10);
+        localStorage.setItem('calcHistory', JSON.stringify(hist));
+        renderHist();
+      }
       return;
-    } else if (k in tokens) expr += tokens[k];
+    } else if (k in tokens) expr = (done && k === 'ans' ? '' : expr) + tokens[k];
     else if (/^[\d.+\-*/%^()!]$/.test(k)) {
       if (/[+\-*/^.]$/.test(expr) && /[+\-*/^.]/.test(k)) expr = expr.slice(0, -1); // replace trailing operator
       expr += k;
     } else return;
+    show();
+  }
 
+  function show() {
+    done = false;
     exprEl.textContent = pretty(expr);
     try { resultEl.textContent = expr ? evaluate(expr) : 0; } catch { /* incomplete expression */ }
   }
+
+  let hist;
+  try { hist = JSON.parse(localStorage.getItem('calcHistory')) || []; } catch { hist = []; }
+  const histEl = document.getElementById('hist');
+  function renderHist() {
+    document.getElementById('history').hidden = !hist.length;
+    histEl.replaceChildren(...hist.map(([x, r]) => {
+      const li = document.createElement('li'), b = document.createElement('button');
+      b.textContent = `${pretty(x)} = ${pretty(r)}`;
+      // Wrap when it would merge with a preceding number (2 then 5 → 2(5)) or is negative.
+      b.onclick = () => {
+        if (done) expr = '';
+        expr += /[\d.]$/.test(expr) || r < 0 ? `(${r})` : r;
+        show();
+      };
+      li.append(b);
+      return li;
+    }));
+  }
+  renderHist();
+  document.getElementById('clearHist').onclick = () => {
+    hist = [];
+    localStorage.removeItem('calcHistory');
+    renderHist();
+  };
+
+  const flash = msg => {
+    resultEl.dataset.msg = msg;
+    clearTimeout(flash.t);
+    flash.t = setTimeout(() => delete resultEl.dataset.msg, 1200);
+  };
+  // Via Promise so a missing navigator.clipboard (non-HTTPS) lands in the failure branch.
+  const copy = () => Promise.resolve().then(() => navigator.clipboard.writeText(resultEl.textContent))
+    .then(() => flash('Copied'), () => flash('Copy failed'));
+  resultEl.addEventListener('click', copy);
+  resultEl.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    e.stopPropagation(); // don't also trigger "=" from the document handler
+    copy();
+  });
 
   document.querySelector('.keys').addEventListener('click', e => {
     if (e.target.dataset.k) press(e.target.dataset.k);
